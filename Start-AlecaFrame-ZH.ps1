@@ -242,7 +242,19 @@ function Restore-OfficialFiles {
         Write-LauncherLog "Official OPK unavailable; created local official backup"
     }
 
-    foreach ($extraScript in @("alecaframe-zh-cn.js", "alecaframe-zh-cn-items.js", "alecaframe-zh-cn-relic-ducats.js", "alecaframe-zh-cn-relic-ocr.js", "alecaframe-zh-cn-riven-ocr.js", "alecaframe-zh-cn-riven-overlay.js", "alecaframe-zh-cn-relic-overlay.js", "alecaframe-zh-cn-relic-recommendation.js", "alecaframe-zh-cn-relic-planner-cache.js", "alecaframe-zh-cn-inventory-price-sync.js", "alecaframe-zh-cn-inventory-images.js")) {
+    foreach ($extraScript in @(
+        "alecaframe-zh-cn.js",
+        "alecaframe-zh-cn-items.js",
+        "alecaframe-zh-cn-relic-ducats.js",
+        "alecaframe-zh-cn-relic-ocr.js",
+        "alecaframe-zh-cn-riven-ocr.js",
+        "alecaframe-zh-cn-riven-overlay.js",
+        "alecaframe-zh-cn-relic-overlay.js",
+        "alecaframe-zh-cn-relic-recommendation.js",
+        "alecaframe-zh-cn-relic-planner-cache.js",
+        "alecaframe-zh-cn-inventory-price-sync.js",
+        "alecaframe-zh-cn-inventory-images.js"
+    )) {
         $extraLocalizer = Join-Path $VersionPath "web\assets\js\$extraScript"
         if (Test-Path -LiteralPath $extraLocalizer) {
             Remove-Item -LiteralPath $extraLocalizer -Force
@@ -650,7 +662,10 @@ function alecaFrameZhCnRequestRewardCapture() {
 '@
     $mainContent = $mainContent.Replace($deployedPromiseRewardCaptureRequest, $synchronousRewardCaptureRequest)
     if (-not $mainContent.Contains('var alecaFrameZhCnRewardFallbackInProgress = false;')) {
-        $mainContent = $mainContent.Replace('var alecaFrameZhCnRewardCaptureEndpoint = "http://127.0.0.1:38147/capture-reward";', "var alecaFrameZhCnRewardCaptureEndpoint = `"http://127.0.0.1:38147/capture-reward`";`r`nvar alecaFrameZhCnRewardFallbackInProgress = false;`r`nvar alecaFrameZhCnRewardFallbackCompleted = false;")
+        $mainContent = $mainContent.Replace(
+            'var alecaFrameZhCnRewardCaptureEndpoint = "http://127.0.0.1:38147/capture-reward";',
+            "var alecaFrameZhCnRewardCaptureEndpoint = `"http://127.0.0.1:38147/capture-reward`";`r`nvar alecaFrameZhCnRewardFallbackInProgress = false;`r`nvar alecaFrameZhCnRewardFallbackCompleted = false;"
+        )
     }
     if (-not $mainContent.Contains('if (alecaFrameZhCnRewardFallbackInProgress || alecaFrameZhCnRewardFallbackCompleted) return;')) {
         $mainContent = $mainContent.Replace('function alecaFrameZhCnStartRewardFallback() {', "function alecaFrameZhCnStartRewardFallback() {`r`n    if (alecaFrameZhCnRewardFallbackInProgress || alecaFrameZhCnRewardFallbackCompleted) return;`r`n    alecaFrameZhCnRewardFallbackInProgress = true;")
@@ -752,6 +767,44 @@ function Get-AlecaFrameRenderer {
         Select-Object -First 1
 }
 
+function Get-CurrentSessionLogLines {
+    param([string]$Path, [datetime]$StartedAt, [int]$Tail = 160)
+
+    # 只读取本次会话的记录，避免旧校验错误或旧加载标记影响判断。
+    $lines = @(Get-Content -LiteralPath $Path -Tail $Tail -Encoding UTF8 -ErrorAction SilentlyContinue)
+    foreach ($line in $lines) {
+        if ([string]$line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})') {
+            $timestamp = [datetime]::ParseExact(
+                $Matches[1],
+                'yyyy-MM-dd HH:mm:ss,fff',
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            if ($timestamp -ge $StartedAt) { [string]$line }
+        }
+    }
+}
+
+function Assert-AlecaFrameSessionHealthy {
+    param([datetime]$StartedAt)
+
+    $traceRoot = Join-Path $env:LOCALAPPDATA "Overwolf\Log"
+    $traces = @(Get-ChildItem -LiteralPath $traceRoot -Filter "Trace_*.log" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $StartedAt } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 2)
+    $blockedPattern = "Closing extension '" + [regex]::Escape($appId) +
+        "' - '(HashMismatch|InvalidSignature|MissingFile|MissingData)'"
+    foreach ($trace in $traces) {
+        $lines = @(Get-CurrentSessionLogLines -Path $trace.FullName -StartedAt $StartedAt)
+        foreach ($line in $lines) {
+            if ($line -match $blockedPattern) {
+                $reason = $Matches[1]
+                Write-LauncherLog "Overwolf blocked AlecaFrame: $line"
+                throw "Overwolf 拒绝加载 AlecaFrame（$reason）。已停止重复启动，将恢复官方文件。请查看 $stateRoot\launcher.log。"
+            }
+        }
+    }
+}
+
 function Wait-OverwolfExtensionReady {
     param([datetime]$StartedAt)
 
@@ -779,15 +832,17 @@ function Wait-OverwolfExtensionReady {
 }
 
 function Start-AlecaFrameAndWait {
-    param([int]$TimeoutSeconds = 60)
+    param([int]$TimeoutSeconds = 60, [datetime]$SessionStartedAt = (Get-Date))
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $nextLaunch = Get-Date
     do {
+        Assert-AlecaFrameSessionHealthy -StartedAt $SessionStartedAt
         if ((Get-Date) -ge $nextLaunch) {
             Start-Process -FilePath $launcherExe `
-                -ArgumentList "-launchapp", $appId, "-from-desktop"
-            $nextLaunch = (Get-Date).AddSeconds(3)
+                -ArgumentList "-launchapp", $appId, "-from-desktop" -WindowStyle Hidden
+            # 为冷启动预留初始化时间，避免频繁弹出又关闭应用。
+            $nextLaunch = (Get-Date).AddSeconds(15)
         }
         Start-Sleep -Milliseconds 500
         $renderer = Get-AlecaFrameRenderer
@@ -854,17 +909,25 @@ try {
     Restore-OfficialFiles -Version $versionDirectory.Name -VersionPath $versionDirectory.FullName
 
     $overwolfStartedAt = Get-Date
+    # 0.311 对部分应用强制校验，仅禁用 extension-validation 已不足以加载汉化。
+    # 报告模式记录校验差异而继续加载；仅影响本次会话，不改官方包、签名或校验清单。
+    $overwolfArguments = @(
+        "--ow-disable-features=extension-validation,read-opk-from-memory",
+        "--ow-enable-features=force-validation-report-only"
+    )
+    Write-LauncherLog "Overwolf compatibility arguments: $($overwolfArguments -join ' ')"
     Start-Process -FilePath $overwolfExe `
-        -ArgumentList "--ow-disable-features=extension-validation,read-opk-from-memory"
+        -ArgumentList $overwolfArguments -WindowStyle Hidden
     Wait-OverwolfExtensionReady -StartedAt $overwolfStartedAt
 
     # First launch uses untouched official files so Overwolf can complete its normal
     # integrity check and initialize AlecaFrame.
-    $originalRenderer = Start-AlecaFrameAndWait -TimeoutSeconds 120
+    $originalRenderer = Start-AlecaFrameAndWait -TimeoutSeconds 120 -SessionStartedAt $overwolfStartedAt
     Start-Sleep -Seconds 4
 
     Add-ChineseFiles -VersionPath $versionDirectory.FullName -EnableRelicOcr $enableRelicOcr
     $patchTime = Get-Date
+    Write-LauncherLog "Chinese files injected; reloading AlecaFrame"
 
     # Reload only AlecaFrame's renderer so the rest of Overwolf remains running.
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -877,17 +940,19 @@ try {
         }
     Start-Sleep -Seconds 3
 
-    $null = Start-AlecaFrameAndWait -TimeoutSeconds 120
+    $null = Start-AlecaFrameAndWait -TimeoutSeconds 120 -SessionStartedAt $overwolfStartedAt
 
     $loaded = $false
     $mainLog = Join-Path $env:LOCALAPPDATA "Overwolf\Log\Apps\AlecaFrame\MainWindow.html.log"
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
         Start-Sleep -Milliseconds 500
+        Assert-AlecaFrameSessionHealthy -StartedAt $overwolfStartedAt
         if (Test-Path -LiteralPath $mainLog) {
             $logItem = Get-Item -LiteralPath $mainLog
             if ($logItem.LastWriteTime -ge $patchTime.AddSeconds(-2)) {
-                $tail = Get-Content -LiteralPath $mainLog -Tail 40 -ErrorAction SilentlyContinue
-                if ($tail -match "\[AlecaFrame 中文补丁\] 已加载") {
+                $tail = @(Get-CurrentSessionLogLines -Path $mainLog -StartedAt $patchTime -Tail 120)
+                # 固定 ASCII 标记避免中文日志乱码导致误报加载失败。
+                if ($tail -match '\[AlecaFrame-ZH\] loaded') {
                     $loaded = $true
                     break
                 }
@@ -898,10 +963,20 @@ try {
         throw "中文脚本未能加载，请查看 $stateRoot\launcher.log"
     }
 
-    Write-LauncherLog "Chinese UI loaded successfully"
+    # 继续观察短暂时间，避免把瞬间出现的加载记录当作稳定启动。
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        Start-Sleep -Milliseconds 500
+        Assert-AlecaFrameSessionHealthy -StartedAt $overwolfStartedAt
+        if (-not (Get-AlecaFrameRenderer)) {
+            throw "汉化页面加载后 AlecaFrame 意外退出，将恢复官方文件。"
+        }
+    }
+    Write-LauncherLog "Chinese UI loaded successfully; renderer remained running for 5 seconds"
 }
 catch {
-    Write-LauncherLog "ERROR: $($_.Exception.Message)"
+    # 保存启动错误，避免恢复过程覆盖弹窗需要显示的信息。
+    $launchFailure = $_.Exception.Message
+    Write-LauncherLog "ERROR: $launchFailure"
     try {
         Get-Process -Name "Overwolf" -ErrorAction SilentlyContinue | Stop-Process
         Start-Sleep -Seconds 3
@@ -914,7 +989,7 @@ catch {
     }
     Add-Type -AssemblyName System.Windows.Forms
     [Windows.Forms.MessageBox]::Show(
-        $_.Exception.Message,
+        $launchFailure,
         "AlecaFrame 中文启动失败",
         [Windows.Forms.MessageBoxButtons]::OK,
         [Windows.Forms.MessageBoxIcon]::Error

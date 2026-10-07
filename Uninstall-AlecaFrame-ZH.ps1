@@ -82,7 +82,16 @@ if ($versionDirectory) {
     }
 
     $extra = Join-Path $versionDirectory.FullName "web\assets\js\alecaframe-zh-cn.js"
-    foreach ($extraName in @("alecaframe-zh-cn.js", "alecaframe-zh-cn-items.js", "alecaframe-zh-cn-relic-ocr.js", "alecaframe-zh-cn-relic-overlay.js", "alecaframe-zh-cn-relic-recommendation.js", "alecaframe-zh-cn-relic-planner-cache.js", "alecaframe-zh-cn-inventory-price-sync.js", "alecaframe-zh-cn-inventory-images.js")) {
+    foreach ($extraName in @(
+        "alecaframe-zh-cn.js",
+        "alecaframe-zh-cn-items.js",
+        "alecaframe-zh-cn-relic-ocr.js",
+        "alecaframe-zh-cn-relic-overlay.js",
+        "alecaframe-zh-cn-relic-recommendation.js",
+        "alecaframe-zh-cn-relic-planner-cache.js",
+        "alecaframe-zh-cn-inventory-price-sync.js",
+        "alecaframe-zh-cn-inventory-images.js"
+    )) {
         $extra = Join-Path $versionDirectory.FullName "web\assets\js\$extraName"
         if (Test-Path -LiteralPath $extra) {
             Remove-Item -LiteralPath $extra -Force
